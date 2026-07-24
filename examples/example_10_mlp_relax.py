@@ -668,6 +668,21 @@ def collect_jobs(cif_path, out_dir=None):
     raise FileNotFoundError(f"No QRS-openffall.cif found in {cif_path}")
 
 
+def _bottom_energy_ylim(energies):
+    """Y-limits for the MLP bottom panel: fit data min/max with modest padding."""
+    arr = np.asarray([e for e in energies if e is not None], dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    ymin = float(np.min(arr))
+    ymax = float(np.max(arr))
+    if ymax <= ymin:
+        pad = max(abs(ymin) * 0.01, 0.05)
+        return ymin - pad, ymax + pad
+    pad = max(0.05, 0.1 * (ymax - ymin))
+    return ymin - pad, ymax + pad
+
+
 def _robust_energy_ylim(energies, low_pad=1.0, high_pct=99.0, high_pad=2.0):
     """
     Y-limits that keep the bulk of energies visible while clipping rare
@@ -692,6 +707,193 @@ def _result_paths(out_dir, model_tag, cutoff_pct):
         os.path.join(out_dir, f'{base}.csv'),
         os.path.join(out_dir, matched),
     )
+
+
+def _find_result_csv(out_dir, model_tag):
+    """Locate an existing MLP results CSV (top100 or legacy energy_*.csv)."""
+    import glob
+
+    preferred = os.path.join(out_dir, f'{model_tag}_top100.csv')
+    if os.path.isfile(preferred):
+        return preferred
+
+    legacy = sorted(glob.glob(os.path.join(out_dir, f'{model_tag}_energy_*.csv')))
+    if legacy:
+        return max(legacy, key=os.path.getmtime)
+
+    other = [
+        p for p in glob.glob(os.path.join(out_dir, f'{model_tag}_*.csv'))
+        if 'matched' not in os.path.basename(p)
+    ]
+    if other:
+        return max(other, key=os.path.getmtime)
+    return None
+
+
+def _plot_openff_mlp_energies(
+    out_png,
+    *,
+    orig_energies,
+    threshold,
+    plot_pct,
+    original_match_ids,
+    unique_count,
+    selected_ids,
+    model_energies,
+    relaxed_match_ids,
+    calculator,
+):
+    """Write the stacked OpenFF / MLP plot used by main() and --replot."""
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+    n = len(orig_energies)
+    xs = list(range(n))
+    ys = orig_energies
+    below_x = [i for i in xs if ys[i] is not None and threshold is not None and ys[i] <= threshold]
+    above_x = [i for i in xs if ys[i] is not None and (threshold is None or ys[i] > threshold)]
+    if below_x:
+        ax_top.plot(
+            below_x,
+            [ys[i] for i in below_x],
+            'o-',
+            markersize=6,
+            label=f'OpenFF (<= {plot_pct:.1f}%)',
+        )
+    if above_x:
+        ax_top.scatter(
+            above_x,
+            [ys[i] for i in above_x],
+            marker='o',
+            color='grey',
+            s=36,
+            label=f'OpenFF (> {plot_pct:.1f}%)',
+        )
+    if original_match_ids:
+        match_x_top = sorted(original_match_ids)
+        ax_top.scatter(
+            match_x_top,
+            [ys[i] for i in match_x_top],
+            s=160,
+            marker='*',
+            c='crimson',
+            edgecolors='black',
+            linewidths=0.8,
+            zorder=5,
+            label=f'OpenFF match ({len(original_match_ids)})',
+        )
+    ax_top.set_ylabel('Energy (eV)')
+    ax_top.grid(True, alpha=0.3)
+    ax_top.legend(loc=3)
+    finite = [y for y in ys if y is not None]
+    if finite:
+        ax_top.set_ylim(min(finite) - 1, float(np.median(finite)) + 2.0)
+
+    sel_x = sorted(selected_ids)
+    sel_y = [model_energies[i] for i in sel_x]
+    ax_bot.plot(
+        sel_x,
+        sel_y,
+        's-',
+        color='#008B8B',
+        label=f'{calculator} energy ({unique_count} unique)',
+        markersize=6,
+        zorder=1,
+    )
+    matched_sel = [i for i in sel_x if i in relaxed_match_ids]
+    if matched_sel:
+        ax_bot.scatter(
+            matched_sel,
+            [model_energies[i] for i in matched_sel],
+            s=160,
+            marker='*',
+            color='crimson',
+            edgecolors='black',
+            linewidths=0.8,
+            zorder=5,
+            label=f'{calculator} match ({len(matched_sel)})',
+        )
+    ax_bot.set_xlabel('ID')
+    ax_bot.set_ylabel(f'{calculator} Energy (eV)')
+    ax_bot.grid(True, alpha=0.3)
+    ax_bot.legend(loc=2)
+    bot_ylim = _bottom_energy_ylim(sel_y)
+    if bot_ylim is not None:
+        ax_bot.set_ylim(*bot_ylim)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200)
+    plt.close(fig)
+    print('Saved plot to', out_png)
+
+
+def replot_from_csv(csv_path, out_png=None, calculator=None):
+    """Redraw the stacked energy plot from an existing results CSV."""
+    import csv
+
+    csv_path = os.path.abspath(csv_path)
+    if out_png is None:
+        out_png = os.path.splitext(csv_path)[0] + '.png'
+    if calculator is None:
+        base = os.path.basename(csv_path)
+        calculator = base.split('_', 1)[0] if '_' in base else 'MACEOFF'
+
+    with open(csv_path, newline='') as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        print(f'No rows in {csv_path}; skipping replot')
+        return False
+
+    rows.sort(key=lambda r: int(r['idx']))
+    n = max(int(r['idx']) for r in rows) + 1
+    orig_energies = [None] * n
+    model_energies = {}
+    selected_ids = []
+    original_match_ids = set()
+    relaxed_match_ids = set()
+    unique_count = 0
+    selected_energies = []
+
+    for r in rows:
+        idx = int(r['idx'])
+        if r.get('orig_energy') not in (None, ''):
+            orig_energies[idx] = float(r['orig_energy'])
+        status = (r.get('status') or '').strip()
+        if r.get('mace_energy') not in (None, ''):
+            selected_ids.append(idx)
+            model_energies[idx] = float(r['mace_energy'])
+            if status in ('ok', 'propagated') and orig_energies[idx] is not None:
+                selected_energies.append(orig_energies[idx])
+        if status == 'ok' and r.get('mace_energy') not in (None, ''):
+            unique_count += 1
+        if (r.get('original_matched') or '').strip().lower() == 'yes':
+            original_match_ids.add(idx)
+        if (r.get('relaxed_matched') or '').strip().lower() == 'yes':
+            relaxed_match_ids.add(idx)
+
+    finite = [e for e in orig_energies if e is not None]
+    if not finite:
+        print(f'No energies in {csv_path}; skipping replot')
+        return False
+
+    threshold = max(selected_energies) if selected_energies else None
+    n_covered = sum(
+        1 for e in finite if threshold is not None and e <= threshold
+    )
+    plot_pct = 100.0 * n_covered / len(finite) if finite else 0.0
+
+    _plot_openff_mlp_energies(
+        out_png,
+        orig_energies=orig_energies,
+        threshold=threshold,
+        plot_pct=plot_pct,
+        original_match_ids=original_match_ids,
+        unique_count=unique_count,
+        selected_ids=selected_ids,
+        model_energies=model_energies,
+        relaxed_match_ids=relaxed_match_ids,
+        calculator=calculator,
+    )
+    return True
 
 
 def _matched_data_header(orig_label, calculator, rms, max_msd):
@@ -1088,77 +1290,18 @@ def main(cif_path, nproc=4, step=200, fmax=0.1, out_dir=None, db_file=None, ref_
             print('Relaxed reference matching failed:', e)
 
     # Create a 2x1 stacked plot
-    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-
-    # Top: ID vs original energy (all entries)
-    xs = id_all
-    ys = orig_energy_all
-    below_x = [i for i in xs if ys[i] is not None and ys[i] <= threshold]
-    above_x = [i for i in xs if ys[i] is not None and ys[i] > threshold]
-    if below_x:
-        ax_top.plot(
-            below_x,
-            [ys[i] for i in below_x],
-            'o-',
-            markersize=6,
-            label=f'OpenFF (<= {plot_pct:.1f}%)',
-        )
-    if above_x:
-        ax_top.scatter(
-            above_x,
-            [ys[i] for i in above_x],
-            marker='o',
-            color='grey',
-            s=36,
-            label=f'OpenFF (> {plot_pct:.1f}%)',
-        )
-    # highlight original CIF matches on top if present
-    if original_match_ids:
-        match_x_top = sorted(list(original_match_ids))
-        match_y_top = [orig_energy_all[i] for i in match_x_top]
-        ax_top.scatter(
-            match_x_top,
-            match_y_top,
-            s=160,
-            marker='*',
-            c='crimson',
-            edgecolors='black',
-            linewidths=0.8,
-            zorder=5,
-            label='OpenFF match',
-        )
-    ax_top.set_ylabel('Energy (eV)')
-    ax_top.grid(True, alpha=0.3)
-    ax_top.legend(loc=3)
-    ys_min = min(ys)
-    ys_median = np.median(ys)
-    ax_top.set_ylim(ys_min - 1, ys_median + 2.0)
-
-    # Bottom: ID vs selected model energy for selected structures
-    sel_x = sorted(selected_ids)
-    sel_y = [model_energies[i] for i in sel_x]
-    ax_bot.plot(sel_x, sel_y, 's-', color='#008B8B', 
-                label=f'{calculator} energy ({len(unique_selected)} unique)', 
-                markersize=6, zorder=1)
-    # Highlight relaxed structure matches on bottom if present
-    if sel_x:
-        matched_sel = [i for i in sel_x if i in relaxed_match_ids]  
-        if matched_sel:
-            ax_bot.scatter(matched_sel, [model_energies[i] for i in matched_sel], s=160, marker='*', 
-                           color='crimson', edgecolors='black', 
-                           lw=0.8, zorder=5, label=f'{calculator} match')
-
-    ax_bot.set_xlabel('ID')
-    ax_bot.set_ylabel(f'{calculator} Energy (eV)')
-    ax_bot.grid(True, alpha=0.3)
-    ax_bot.legend(loc=2)
-    bot_ylim = _robust_energy_ylim(sel_y)
-    if bot_ylim is not None:
-        ax_bot.set_ylim(*bot_ylim)
-
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=200)
-    print('Saved plot to', out_png) 
+    _plot_openff_mlp_energies(
+        out_png,
+        orig_energies=orig_energy_all,
+        threshold=threshold,
+        plot_pct=plot_pct,
+        original_match_ids=original_match_ids,
+        unique_count=len(unique_selected),
+        selected_ids=selected_ids,
+        model_energies=model_energies,
+        relaxed_match_ids=relaxed_match_ids,
+        calculator=calculator,
+    )
 
     # Also save CSV of results
     import csv
@@ -1362,10 +1505,15 @@ if __name__ == '__main__':
         action='store_true',
         help='Recompute even if the output PNG and CSV already exist',
     )
+    parser.add_argument(
+        '--replot',
+        action='store_true',
+        help='Only redraw PNG plots from existing CSV results (no MLP relaxation)',
+    )
     parser.add_argument('--out-dir', default=None, help='Output directory (defaults to input folder; if set without QRS-openffall.cif, process all subdirs)')
     args = parser.parse_args()
-    args.nproc = resolve_nproc(args.nproc, mem_per_worker_gb=args.mem_per_worker_gb)
-    print(f'Using {args.nproc} parallel workers')
+    if args.replot and args.force:
+        parser.error('Use only one of --replot or --force')
     if args.quick and args.model is not None:
         parser.error('Use only one of --quick or --model')
 
@@ -1382,6 +1530,29 @@ if __name__ == '__main__':
         parser.error(f'No QRS-openffall.cif found under {args.cif}')
 
     model = resolve_model(args.calculator, model=args.model, quick=args.quick)
+    default_model = DEFAULT_MODELS.get(args.calculator)
+    model_tag = f'{args.calculator}_{model}' if model != default_model else args.calculator
+
+    if args.replot:
+        n_ok = 0
+        n_miss = 0
+        for i, (job_dir, job_out_dir) in enumerate(jobs, start=1):
+            csv_path = _find_result_csv(job_out_dir, model_tag)
+            if csv_path is None:
+                n_miss += 1
+                print(f'[{i}/{len(jobs)}] No CSV for {job_out_dir}; skip')
+                continue
+            out_png = os.path.splitext(csv_path)[0] + '.png'
+            if len(jobs) > 1:
+                print(f'[{i}/{len(jobs)}] Replot {csv_path}')
+            if replot_from_csv(csv_path, out_png=out_png, calculator=args.calculator):
+                n_ok += 1
+        print(f'Replot done: {n_ok} plots, {n_miss} missing CSV')
+        raise SystemExit(0)
+
+    args.nproc = resolve_nproc(args.nproc, mem_per_worker_gb=args.mem_per_worker_gb)
+    print(f'Using {args.nproc} parallel workers')
+
     _configure_worker_threads()
     t0 = time.perf_counter()
     cache_path = ensure_mace_model_cached(args.calculator, model=model, quick=args.quick)
