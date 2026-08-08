@@ -1,0 +1,53 @@
+2026-08-08 00:52:20,722| 
+-------Global Crystal Structure Prediction------
+smile     : xyz_only
+Zprime    : [1]
+N_torsion : 0
+N_conformers: [1] (total 1)
+sg        : [61]
+ncpu      : 1
+directory : ctmtna-simple
+opt_lat   : True
+usp_mpi   : False
+
+mlp       : MACE
+Mode      : Sampling
+cif       : ctmtna-simple/WFS-gaff.cif
+forcefield: Predefined
+
+Method    : Stochastic Width First Sampling
+Generation:    4
+Population:    5
+Fraction  : 1.00 0.00
+2026-08-08 00:52:20,722| Generation 0 starts
+2026-08-08 00:53:26,685| 
+-------Global Crystal Structure Prediction------
+smile     : xyz_only
+Zprime    : [1]
+N_torsion : 0
+N_conformers: [1] (total 1)
+sg        : [61]
+ncpu      : 1
+directory : ctmtna-simple
+opt_lat   : True
+usp_mpi   : False
+
+mlp       : MACE
+Mode      : Sampling
+cif       : ctmtna-simple/WFS-gaff.cif
+forcefield: Predefined
+
+Method    : Stochastic Width First Sampling
+Generation:    4
+Population:    5
+Fraction  : 1.00 0.00
+2026-08-08 00:53:26,685| Generation 0 starts
+2026-08-08 00:53:29,572| Using CPU
+2026-08-08 00:53:29,572| Using head Default out of  ['Default']
+2026-08-08 00:53:29,572| Default dtype float32 does not match model dtype float64, converting models to float32.
+2026-08-08 00:53:29,700| Using CPU
+2026-08-08 00:53:29,700| Using head Default out of  ['Default']
+2026-08-08 00:53:29,700| Default dtype float32 does not match model dtype float64, converting models to float32.
+2026-08-08 00:56:53,522| Generation-0 finishes 5/5 strucs
+2026-08-08 00:56:53,526| Success rate @ Gen   0:  0.0000%
+2026-08-08 00:56:53,526| Generation 1 starts
