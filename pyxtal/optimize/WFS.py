@@ -92,6 +92,7 @@ class WFS(GlobalOptimize):
         use_mpi: bool = False,
         pre_opt: bool = False,
         check: bool = True,
+        xyz_only: bool = False,
     ):
         if isinstance(random_state, Generator):
             self.random_state = random_state.spawn(1)[0]
@@ -142,6 +143,7 @@ class WFS(GlobalOptimize):
             check_stable,
             use_mpi,
             pre_opt,
+            xyz_only=xyz_only,
         )
 
         if fracs is None:
