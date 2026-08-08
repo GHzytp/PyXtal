@@ -553,6 +553,7 @@ def optimizer(
     skip_mlp = False,
     output_mlp = True,
     pre_opt = False,
+    xyz_only = False,
 ):
     """
     Structural relaxation for each individual pyxtal structure.
@@ -576,6 +577,33 @@ def optimizer(
     # Perform pre-relaxation
     if pre_opt:
         struc.optimize_lattice_and_rotation()
+
+    if xyz_only:
+        cwd = os.getcwd()
+        t0 = time()
+        os.makedirs(workdir, exist_ok=True)
+        os.chdir(workdir)
+        try:
+            s = ASE_relax(
+                struc,
+                mlp,
+                opt_lat=opt_lat,
+                step=200 if opt_lat else 50,
+                fmax=0.1,
+                logfile="ase.log",
+            )
+            if s is None:
+                return None
+            eng = s.get_potential_energy()
+            stress = max(abs(s.get_stress())) / units.GPa
+            if stress > 30.0:
+                return None
+
+            xtal = pyxtal(molecular=True)
+            xtal.from_seed(ase2pymatgen(s), molecules=struc.molecules)
+            return {"xtal": xtal, "energy": eng, "time": time() - t0}
+        finally:
+            os.chdir(cwd)
 
     if calculators is None:
         calculators = ["CHARMM"]
@@ -654,7 +682,7 @@ def optimizer(
             struc.energy < 9999
             and struc.lattice.is_valid_matrix()
             # and struc.check_distance()
-            and 0.25 < struc.get_density() < 3.0
+            and 1.25 < struc.get_density() < 3.0
         ):
             s = struc.to_ase()
             step = 50 if mlp in ['MACE', 'ANI'] else 25
@@ -665,14 +693,13 @@ def optimizer(
 
             t = time() - t0
             if t > max_time:
-                try:
-                    print("!!!Long time in ani calculation", t)
-                    print(struc.get_1D_representation().to_string())
-                    struc.optimize_lattice()
-                except:
-                    print("Trouble in optLat")
-                    return None
-            elif stress < stress_tol:
+                # The relaxation has already completed successfully.  Do not
+                # discard it merely because it exceeded this advisory target;
+                # the worker-level SIGALRM enforces the actual timeout.
+                print(f"MLP relaxation exceeded advisory time: {t:.1f} s "
+                      f"(target {max_time:.1f} s)")
+
+            if stress < stress_tol:
                 results = {}
                 if output_mlp:
                     xtal = pyxtal(molecular=True)
@@ -732,6 +759,7 @@ def optimizer_par(
     opt_lat=True,
     delta_length=1.0,
     delta_angle=15.0,
+    xyz_only=False,
 ):
     """
     A routine used for parallel structure optimization
@@ -777,6 +805,7 @@ def optimizer_par(
             opt_lat=opt_lat,
             delta_length=delta_length,
             delta_angle=delta_angle,
+            xyz_only=xyz_only,
             label=labels[i] if labels is not None else None,
         )
         results.append((id, xtal, match, stable))
@@ -814,6 +843,7 @@ def optimizer_single(
     opt_lat=True,
     delta_length=1.0,
     delta_angle=15.0,
+    xyz_only=False,
     label=None,
 ):
     """
@@ -859,7 +889,7 @@ def optimizer_single(
     else:
         res = optimizer(xtal, atom_info, workdir, job_tag, opt_lat,
                         mlp=mlp, skip_mlp=skip_mlp, output_mlp=output_mlp,
-                        pre_opt=pre_opt)
+                        pre_opt=pre_opt, xyz_only=xyz_only)
 
     match = False # used for matching with reference
     stable = True # used for tagging if the structure is stable
@@ -917,8 +947,11 @@ def optimizer_single(
                     tag += 'Stable'
                 else:
                     tag += 'Shallow'
-        rep = xtal.get_1D_representation()
-        strs = rep.to_string(None, eng / N, tag)
+        try:
+            rep = xtal.get_1D_representation()
+            strs = rep.to_string(None, eng / N, tag)
+        except Exception:
+            strs = f"{tag:8s} E={eng / N:12.3f}"
 
         # 3. Check match w.r.t the reference
         if ref_pmg is not None:
@@ -933,7 +966,7 @@ def optimizer_single(
                 # Further refine the structure
                 match = True
                 str1 = f"Match {rmsd[0]:6.2f} {rmsd[1]:6.2f} {eng / N:12.3f} "
-                if not skip_mlp:
+                if not skip_mlp and not xyz_only:
                     xtal, eng1 = refine_struc(xtal, smiles, ASE_relax, mlp)
                     str1 += f"Full Relax -> {eng1 / N:12.3f}"
                     eng = eng1
