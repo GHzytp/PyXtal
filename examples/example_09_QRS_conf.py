@@ -3,8 +3,10 @@ Example: Run QRS with pregenerated molecular conformers.
 
 This script iterates over entries in pyxtal/database/test.db, precomputes a pool
 of pyxtal_molecule conformers via generate_molecules, and passes them to QRS.
-With the lattice fixed and conformers pregenerated, QRS samples only Wyckoff-site
-fractional coordinates and molecular orientations for each trial crystal.
+With conformers pregenerated, QRS samples only Wyckoff-site fractional
+coordinates and molecular orientations for each trial crystal. The lattice is
+fixed by default, but ``--relax-lattice`` enables CHARMM cell relaxation after
+the initial fixed-cell coordinate minimization.
 
 Results are appended to <out-dir>/qrs_results.csv (default: Tests-0611).
 """
@@ -692,6 +694,15 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--relax-lattice",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allow CHARMM to optimize the symmetry-constrained lattice after "
+            "its initial fixed-cell coordinate minimization (default: disabled)"
+        ),
+    )
+    parser.add_argument(
         "--max-mol-combos-per-grid",
         default=0,
         type=int,
@@ -934,7 +945,12 @@ if __name__ == "__main__":
             gauge_site_index=args.gauge_site,
             order_identical_sites=args.order_identical_sites,
             N_min_matches=args.min_matches,
+            opt_lat=args.relax_lattice,
         )
+        if args.relax_lattice:
+            print("Final CHARMM relaxation: atomic coordinates + lattice")
+        else:
+            print("Final CHARMM relaxation: atomic coordinates only (fixed lattice)")
         t0 = perf_counter()
         success_rate = qrs.run(ref_pmg=ref_pmg, max_rmsd=args.max_rmsd)
         time_cost_min = (perf_counter() - t0) / 60
