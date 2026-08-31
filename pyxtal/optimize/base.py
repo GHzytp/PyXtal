@@ -176,6 +176,7 @@ class GlobalOptimize:
         use_mpi: bool = False,
         pre_opt: bool = False,
         N_min_matches: int = 10,
+        xyz_only: bool = False,
     ):
 
         self.ncpu = N_cpu
@@ -198,6 +199,7 @@ class GlobalOptimize:
         # Molecular information
         self.smile = smiles
         self.smiles = self.smile.split(".")  # list
+        self.xyz_only = xyz_only
         self.torsions = torsions
         self.molecules = molecules
         self.block = block
@@ -205,9 +207,15 @@ class GlobalOptimize:
         self.composition = [
             1] * len(self.smiles) if composition is None else composition
         self.N_torsion = 0
-        for smi, comp in zip(self.smiles, self.composition):
-            self.N_torsion += len(find_rotor_from_smile(smi)
-                                  ) * int(max([comp, 1]))
+        if self.xyz_only and self.molecules is not None:
+            for pool, comp in zip(self.molecules, self.composition):
+                molecule = pool[0] if isinstance(pool, (list, tuple)) else pool
+                torsionlist = getattr(molecule, "torsionlist", None) or []
+                self.N_torsion += len(torsionlist) * int(max([comp, 1]))
+        else:
+            for smi, comp in zip(self.smiles, self.composition):
+                self.N_torsion += len(find_rotor_from_smile(smi)
+                                      ) * int(max([comp, 1]))
 
         # Crystal information
         self.pre_opt = pre_opt
@@ -259,7 +267,15 @@ class GlobalOptimize:
                             filename=self.log_file, level=logging.INFO)
         self.logging = logging
 
-        if info is not None:
+        if self.xyz_only:
+            if self.skip_mlp:
+                raise ValueError("xyz_only requires skip_mlp=False")
+            if self.molecules is None:
+                raise ValueError("xyz_only requires pre-built molecular geometries")
+            self.atom_info = {}
+            self.parameters = None
+            self.ff_opt = False
+        elif info is not None:
             self.atom_info = info
             self.parameters = None
             self.ff_opt = False
@@ -461,8 +477,9 @@ class GlobalOptimize:
             results = self._run(pool)
         except (EOFError, OSError) as e:
             print(f"Error in running the optimizer: {e}")
-            pool.terminate()
-            pool.join()
+            if pool is not None:
+                pool.terminate()
+                pool.join()
             return None
 
         if self.rank == 0:
@@ -796,11 +813,22 @@ class GlobalOptimize:
                         g1 = h1 * np.exp(-0.5 * diff1)  # cell
                     # Torsion
                     g2 = 0
-                    if len(tor1) > 0:
+                    # Relaxation may discover higher symmetry, so a Z'>1
+                    # candidate and a saved Z'=1 structure can have different
+                    # numbers (or layouts) of molecular-site records.  Their
+                    # torsion vectors are not directly comparable.  Keep the
+                    # lattice Gaussian, but only compare torsions when the
+                    # representation layouts match.
+                    same_layout = (
+                        len(ref) == len(rep)
+                        and all(len(ref[j]) == len(rep[j])
+                                for j in range(1, len(rep)))
+                    )
+                    if len(tor1) > 0 and same_layout:
                         tor2 = np.zeros(self.N_torsion)
                         count = 0
-                        for j in range(1, len(rep)):
-                            if len(rep[j]) > N_id:  # for Cl-
+                        for j in range(1, len(ref)):
+                            if len(ref[j]) > N_id:  # for Cl-
                                 tor2[count: count +
                                      len(ref[j]) - N_id - 1] = ref[j][N_id:-1]
                                 count += len(ref[j]) - N_id
@@ -900,6 +928,7 @@ class GlobalOptimize:
             self.opt_lat,
             getattr(self, 'delta_length', 1.0),
             getattr(self, 'delta_angle', 15.0),
+            self.xyz_only,
         ]
         return args
 
