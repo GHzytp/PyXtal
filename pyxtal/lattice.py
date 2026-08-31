@@ -1023,6 +1023,21 @@ class Lattice:
         except:
             return False
 
+    def lengths_in_bounds(self, min_len=2.0, max_len=50.0):
+        """
+        Hard gate on cell lengths (Å). A CHARMM lattice min that collapses
+        any axis below ``min_len`` (default 2 Å) or expands above ``max_len``
+        fails this check so the candidate can be discarded.
+        """
+        a, b, c = self.get_para()[:3]
+        try:
+            a, b, c = float(a), float(b), float(c)
+        except (TypeError, ValueError):
+            return False
+        if not np.isfinite([a, b, c]).all():
+            return False
+        return min(a, b, c) >= min_len and max(a, b, c) < max_len
+
     def is_valid_lattice(self, tol=1e-3):
         ltype = self.ltype.lower()
 

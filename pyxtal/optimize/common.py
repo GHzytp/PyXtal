@@ -729,7 +729,7 @@ def optimizer_par(
     output_mlp,
     check_stable,
     pre_opt,
-    opt_lat=True,
+    opt_lat=None,
     delta_length=1.0,
     delta_angle=15.0,
 ):
@@ -811,7 +811,7 @@ def optimizer_single(
     output_mlp,
     check_stable,
     pre_opt,
-    opt_lat=True,
+    opt_lat=None,
     delta_length=1.0,
     delta_angle=15.0,
     label=None,
@@ -827,7 +827,9 @@ def optimizer_single(
     """
 
     # 1. Obtain the structure model
-    opt_lat = lattice is None
+    # Preserve the historical automatic behavior when no explicit choice is
+    # supplied, while allowing callers to relax a provided starting lattice.
+    opt_lat = lattice is None if opt_lat is None else bool(opt_lat)
     if xtal is None:
         xtal = randomizer(
             smiles,

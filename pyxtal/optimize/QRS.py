@@ -870,7 +870,7 @@ def generate_qrs_xtals(
         for seq in seqs:
             chunk = scaled[prev:prev + seq]
             chunks.append(chunk)
-            x.append([0] + chunk + [0])
+            x.append(site_representation_from_free_dofs(chunk))
             prev += seq
         return representation(x, smiles), chunks
 
@@ -1156,6 +1156,16 @@ def expand_delta_angle_per_dof(delta_spec, composition, wp_bounds, default=30.0)
             site_idx += 1
 
     return flat
+
+
+def site_representation_from_free_dofs(chunk):
+    """Restore fixed Euler placeholders omitted from a site's free-DOF bounds."""
+    values = list(chunk)
+    if len(values) < 3:
+        raise ValueError(f"Expected three fractional coordinates, got {len(values)} DOFs")
+    position = values[:3]
+    orientation = (values[3:] + [0.0, 0.0, 0.0])[:3]
+    return [0] + position + orientation + [0]
 
 
 def _delta_angle_enabled(delta_angle, delta_length):
@@ -1487,6 +1497,8 @@ class QRS(GlobalOptimize):
         max_grid_product (float or None): cap on prod(n_levels); levels are scaled down
             if the raw product exceeds this (default: None disables; set e.g. 1e9 to cap)
         N_min_matches (int): quit early after this many matches (default: 10)
+        opt_lat (bool or None): explicitly enable or disable lattice relaxation.
+            None preserves the automatic behavior (relax only without a supplied lattice).
     """
 
     def __init__(
@@ -1519,6 +1531,7 @@ class QRS(GlobalOptimize):
         factor: float = 1.1,
         eng_cutoff: float = 5.0,
         E_max: float = 1e10,
+        random_state=None,
         verbose: bool = False,
         max_time: float | None = None,
         matcher: StructureMatcher | None = None,
@@ -1541,6 +1554,7 @@ class QRS(GlobalOptimize):
         gauge_site_index: int = 0,
         order_identical_sites: bool = True,
         N_min_matches: int = 10,
+        opt_lat: bool | None = None,
     ):
 
         # POPULATION parameters:
@@ -1604,7 +1618,7 @@ class QRS(GlobalOptimize):
             factor,
             eng_cutoff,
             E_max,
-            None, #random_state,
+            random_state,
             max_time,
             matcher,
             early_quit,
@@ -1612,6 +1626,8 @@ class QRS(GlobalOptimize):
             use_mpi,
             N_min_matches=N_min_matches,
         )
+        if opt_lat is not None:
+            self.opt_lat = bool(opt_lat)
 
         if self.rank == 0:
             strs = self.full_str()
@@ -1688,12 +1704,31 @@ class QRS(GlobalOptimize):
         mult = len(wp)
         numIons = [int(c * mult) for c in self.composition]
 
+        last_error = None
         for _ in range(200):
-            tmp.from_random(3, sg, smiles, numIons,
-                            lattice=self.lattice, use_hall=self.use_hall,
-                            sites=self.sites, t_factor=0.2)  # skip structures with bad distances
+            try:
+                tmp.from_random(
+                    3,
+                    sg,
+                    smiles,
+                    numIons,
+                    lattice=self.lattice,
+                    use_hall=self.use_hall,
+                    sites=self.sites,
+                    t_factor=0.2,
+                    random_state=self.random_state,
+                )  # skip structures with bad distances
+            except RuntimeError as exc:
+                if "long time to generate structure" not in str(exc):
+                    raise
+                last_error = exc
+                continue
             if tmp.valid:
                 break
+        else:
+            raise RuntimeError(
+                "QRS bootstrap failed after 200 deterministic retries"
+            ) from last_error
         self.hall_number = sg
         self.ltype = self.lattice.ltype
         self.wp_bounds = [site.get_bounds() for site in tmp.mol_sites]

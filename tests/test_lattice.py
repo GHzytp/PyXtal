@@ -56,6 +56,29 @@ class TestLattice(unittest.TestCase):
         l7 = l7.transform_multi(trans)
         assert np.abs(l7.matrix - l6.matrix).sum() < 0.25
 
+    def test_lengths_in_bounds(self):
+        ok = Lattice.from_para(9.41, 10.90, 14.71, 90, 90, 90, ltype="orthorhombic")
+        assert ok.lengths_in_bounds()
+
+        def collapsed(a, b, c):
+            lat = Lattice.from_para(10.0, 10.0, 10.0, 90, 90, 90, ltype="orthorhombic")
+            lat.set_para([a, b, c, 90, 90, 90])
+            return lat
+
+        # Real CHARMM lattice-min collapses from OBEQUJ conf_qrs_091
+        g6_p19 = collapsed(0.019120, 10.508215, 22.919555)
+        g6_p55 = collapsed(13.220959, 6.425585, 0.385242)
+        bug_cif = collapsed(0.001693, 13.858010, 20.456845)
+        just_below = collapsed(1.99, 10.0, 12.0)
+        at_floor = collapsed(2.0, 10.0, 12.0)
+        huge = collapsed(15.15, 17.55, 55.0)
+        assert at_floor.lengths_in_bounds()
+        assert not g6_p19.lengths_in_bounds()
+        assert not g6_p55.lengths_in_bounds()
+        assert not bug_cif.lengths_in_bounds()
+        assert not just_below.lengths_in_bounds()
+        assert not huge.lengths_in_bounds()
+
     def test_is_valid_lattice(self):
         l8 = Lattice.from_para(3.454, 3.401, 5.908, 90.00, 105.80, 91.00, ltype="monoclinic")
         l9 = Lattice.from_para(3.454, 3.401, 5.908, 90.00, 105.80, 90.00, ltype="monoclinic")

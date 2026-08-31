@@ -1,5 +1,6 @@
 import contextlib
 import os
+import signal
 import shutil
 import subprocess
 import numpy as np
@@ -98,10 +99,20 @@ class CHARMM:
             print(self.structure.lattice)
             print(self.structure.lattice.matrix)
             self.error = True
+        if not self.error and not self._lattice_lengths_ok():
+            print(
+                "Skip CHARMM: cell lengths out of bounds "
+                f"{self.structure.lattice.get_para()[:3]}"
+            )
+            self.error = True
         # print("\nbeginining lattice: ", struc.lattice)
 
         self.lat_mut = lat_mut
         self.rotate = rotate
+
+    def _lattice_lengths_ok(self):
+        """Reject boxes with any axis < 2 Å or ≥ 50 Å after lattice min."""
+        return self.structure.lattice.lengths_in_bounds(min_len=2.0, max_len=50.0)
 
     def run(self, clean=True):
         """
@@ -113,6 +124,10 @@ class CHARMM:
             os.chdir(self.folder)
 
             self.write()  # ; print("write", time()-t0)
+            if self.error:
+                self.structure.energy = self.errorE
+                os.chdir(cwd)
+                return
             res = self.execute()  # ; print("exe", time()-t0)
             if res is not None:
                 self.read()  # ; print("read", self.structure.energy)
@@ -123,33 +138,65 @@ class CHARMM:
 
             os.chdir(cwd)
 
-    def execute(self):
-        cmd = self.exe + " < " + self.input + " > " + self.output
-        # os.system(cmd)
-        with open(os.devnull, 'w') as devnull:
+    def _kill_charmm(self, proc):
+        """Kill CHARMM and its process group so a hung Crystal Build cannot linger."""
+        if proc is None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             try:
-                # Run the external command with a timeout
-                result = subprocess.run(
-                    cmd, shell=True, timeout=self.timeout, check=True, stderr=devnull)
-                return result.returncode  # Or handle the result as needed
-            except subprocess.CalledProcessError as e:
-                print(f"Cmd '{cmd}' failed. Trying another cutoff.....")
-                try:
-                    # try again with a different cutoff
-                    self.write(cutoff=16.0)
-                    result = subprocess.run(
-                    cmd, shell=True, timeout=self.timeout, check=True, stderr=devnull)
-                    return result.returncode  # Or handle the result as needed
-                except subprocess.CalledProcessError as e:
-                    print(f"Cmd '{cmd}' failed with return code {e.returncode}.")
-                    os.system(f'cp {self.input} err-{self.input}')
-                    return None
-                except subprocess.TimeoutExpired:
-                    print(f"External cmd {cmd} timed out.")
-                    return None
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+    def _run_charmm_once(self):
+        """Run CHARMM reading ``self.input``, writing ``self.output``. Return 0 or raise."""
+        with open(self.input) as stdin, open(self.output, "w") as stdout:
+            proc = subprocess.Popen(
+                [self.exe],
+                stdin=stdin,
+                stdout=stdout,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                returncode = proc.wait(timeout=self.timeout)
             except subprocess.TimeoutExpired:
-                print(f"External cmd {cmd} timed out.")
+                print(f"External cmd {self.exe} timed out.")
+                self._kill_charmm(proc)
+                raise
+            if returncode != 0:
+                raise subprocess.CalledProcessError(returncode, self.exe)
+            return returncode
+
+    def execute(self):
+        try:
+            return self._run_charmm_once()
+        except subprocess.CalledProcessError as e:
+            print(f"Cmd '{self.exe}' failed. Trying another cutoff.....")
+            try:
+                self.write(cutoff=16.0)
+                if self.error:
+                    return None
+                return self._run_charmm_once()
+            except subprocess.CalledProcessError as e2:
+                print(f"Cmd '{self.exe}' failed with return code {e2.returncode}.")
+                os.system(f'cp {self.input} err-{self.input}')
                 return None
+            except subprocess.TimeoutExpired:
+                print(f"External cmd {self.exe} timed out.")
+                return None
+        except subprocess.TimeoutExpired:
+            print(f"External cmd {self.exe} timed out.")
+            return None
+        except OSError as e:
+            print(f"Failed to launch {self.exe}: {e}")
+            return None
 
     def clean(self):
         os.remove(self.input)
@@ -166,6 +213,14 @@ class CHARMM:
         if self.lat_mut: lat = lat.mutate()
 
         a, b, c, alpha, beta, gamma = lat.get_para(degree=True)
+        if min(a, b, c) < 2.0 or max(a, b, c) >= 50.0:
+            print(
+                "Skip CHARMM write: cell lengths out of bounds "
+                f"a={a:.4f} b={b:.4f} c={c:.4f}"
+            )
+            self.error = True
+            self.structure.energy = self.errorE
+            return
         ltype = lat.ltype
         if ltype in ['trigonal', 'Trigonal']:
             ltype = 'hexagonal'
@@ -222,10 +277,15 @@ class CHARMM:
                     )
                     # quickly check if
                     if abs(coord).max() > 500.0:
-                        print("Unexpected large input coordinates, stop and debug")
+                        print("Unexpected large input coordinates; skip CHARMM")
                         print(self.structure)
-                        self.structure.to_file('bug.cif')
-                        import sys; sys.exit()
+                        try:
+                            self.structure.to_file('bug.cif')
+                        except Exception:
+                            pass
+                        self.error = True
+                        self.structure.energy = self.errorE
+                        return
 
             f.write(f"write psf card name {self.psf:s}\n")
             f.write(f"write coor crd card name {self.crd:s}\n")
@@ -308,6 +368,14 @@ class CHARMM:
                         tmp = line.split(":")[-1].split()
                         tmp = [float(x) for x in tmp]
                         self.structure.lattice.set_para(tmp)
+                        if not self._lattice_lengths_ok():
+                            print(
+                                "CHARMM returned cell lengths out of bounds "
+                                f"{tmp[:3]}; discard"
+                            )
+                            self.structure.energy = self.errorE
+                            self.error = True
+                            return
                     elif line.find("ATOM") != -1:
                         try:
                             xyz = line.split()[5:8]
@@ -328,6 +396,14 @@ class CHARMM:
                     count += len(site.molecule.mol)
                 # print("after relax:", self.structure.lattice, "iter: ", self.structure.iter)
                 self.structure.optimize_lattice()
+                if not self._lattice_lengths_ok():
+                    print(
+                        "Cell lengths out of bounds after lattice opt "
+                        f"{self.structure.lattice.get_para()[:3]}; discard"
+                    )
+                    self.structure.energy = self.errorE
+                    self.error = True
+                    return
                 self.structure.update_wyckoffs()
                 # print("after latopt:", self.structure.lattice, self.structure.check_distance()); import sys; sys.exit()
             except:
